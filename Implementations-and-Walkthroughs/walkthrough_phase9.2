@@ -1,0 +1,43 @@
+# Walkthrough: Audio-Reactive Emissive Pulsing (Phase 9.2)
+
+Phase 9.2 connects the Edge-TTS audio playback volume to the 3D visual engine via the Web Audio API, enabling the humanoid bust to dynamically pulse with speech volume in real time without causing React re-renders or additional backend overhead.
+
+---
+
+## Changes Implemented
+
+### 1. Web Audio API Setup & Autoplay Handling ([App.jsx](file:///D:/AI%20ML%20Project/frontend/src/App.jsx))
+- **Audio Context & Analyser Initialization (`initAudioAnalyzer`)**:
+  - Configured `AudioContext`, `AnalyserNode` (`fftSize = 256`, `smoothingTimeConstant = 0.8`), and a normalized `volumeRef` storing amplitude in the range `[0.0, 1.0]`.
+  - Safely connected the persistent Edge-TTS audio element:
+    $$\text{audioElement} \longrightarrow \text{MediaElementAudioSourceNode} \longrightarrow \text{AnalyserNode} \longrightarrow \text{AudioContext.destination}$$
+  - Guarded `createMediaElementSource` to ensure single initialization and prevent browser `InvalidStateError`.
+- **Browser Autoplay Compliance**:
+  - Attached gesture listeners (`click`, `keydown`) and explicit `.resume()` invocations in `handleStartSession`, push-to-talk, text submit, and audio message playback.
+- **60 FPS Animation Frame Reader**:
+  - Implemented continuous `requestAnimationFrame` loop that calls `analyser.getByteFrequencyData()`, calculates the RMS amplitude, normalizes it to $[0.0, 1.0]$, and stores it directly into `volumeRef.current`.
+  - Zero React state thrashing or re-renders during high-frequency audio analysis.
+- **Prop Forwarding**: Passed `volumeRef` directly to `<Hologram state={companionState} gazeRef={targetGazeRef} volumeRef={volumeRef} />`.
+
+### 2. Emissive Intensity Modulation ([Hologram.jsx](file:///D:/AI%20ML%20Project/frontend/src/components/Hologram.jsx))
+- **Shared Material Instance**:
+  - Instantiated a single `THREE.MeshStandardMaterial` referenced via `materialRef` across the head, neck, and shoulders/chest meshes.
+  - Dynamically updates base emissive color (Gold `#f59e0b` when speaking, Cyan `#06b6d4` when idle, Purple `#a855f7` when thinking, Red `#ef4444` on error) on state transitions.
+- **Dynamic Emissive Pulsing Loop in `useFrame`**:
+  - When `state === 'speaking'`:
+    $$\text{targetIntensity} = 0.4 + (\text{volumeRef.current} \times 1.5)$$
+    Smoothed toward `targetIntensity` using `THREE.MathUtils.lerp(..., 0.15)`.
+  - When `state !== 'speaking'`:
+    Smoothed back toward the default baseline intensity ($0.5$) using `THREE.MathUtils.lerp(..., 0.15)`.
+
+---
+
+## Verification & Build Results
+- Executed `npm run build` with Vite in `frontend/`:
+  ```
+  vite v5.4.21 building for production...
+  ✓ 2363 modules transformed.
+  ✓ built in 6.81s
+  ```
+- Compilation passed cleanly with 0 errors.
+- Web Audio API routes playback to `audioContext.destination`, ensuring clear speaker output while concurrently feeding frequency data to the visualizer.

@@ -1,0 +1,28 @@
+# Walkthrough: Humanoid Bust Placeholder (Phase 8)
+
+The goal of this task was to replace the imported GLTF BrainStem model with a clean, geometric humanoid bust using native Three.js primitives. This prevents GLTF loading overhead and provides a sleek, screen-anchored presence.
+
+## Changes Made
+
+### 1. Rebuilt `HologramModel` Component
+- **File**: `frontend/src/components/Hologram.jsx`
+- **Removed**: Eliminated `useGLTF` and `useAnimations` imports, effectively dropping the dependency on `/BrainStem.glb`.
+- **Primitives Built**: Constructed a `<group>` containing three distinct meshes:
+  - **Head**: A `<sphereGeometry>` scaled and positioned to simulate a human head.
+  - **Neck**: A thin `<cylinderGeometry>` connecting the head to the torso.
+  - **Shoulders/Chest**: A wider `<cylinderGeometry>` acting as the base.
+- **Styling**: Applied a unified `<meshStandardMaterial>` to all components with `transparent={true}`, `opacity={0.9}`, `roughness={0.25}`, and `metalness={0.1}`. The `wireframe` mode was explicitly disabled.
+- **Dynamic Emissive Colors**: The material's `emissive` color is dynamically bound to the WebSocket `state` prop, providing instant visual feedback (e.g., Purple for `thinking`, Cyan for `idle`).
+
+### 2. Scene Anchoring & Lighting
+- **Camera Calibration**: Adjusted the `Canvas` camera to `position: [0, 0.2, 1.8]` with a tight `fov: 45` to frame the bust intimately.
+- **Positioning**: Anchored the bust group at `position={[0, -0.65, 0]}`. This pushes the shoulders precisely to the bottom edge of the container, creating the illusion of the AI looking out from inside the screen bezel.
+- **Lighting Dynamics**: 
+  - Added a `<pointLight position={[0, -1, 1]}>` to cast a dramatic uplight (simulating the laptop screen glowing onto the face).
+  - Maintained balanced ambient and directional lights to highlight the geometric curves.
+
+## Validation
+The React frontend should have automatically hot-reloaded. 
+- The canvas will now render cleanly without any external `.glb` network requests. 
+- The geometry will sit flush against the bottom edge of the viewport.
+- The emissive glow will softly transition between states without overexposing the scene.

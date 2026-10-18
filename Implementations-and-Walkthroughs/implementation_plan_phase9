@@ -1,0 +1,38 @@
+# Goal Description
+
+The goal is to implement Phase 9.1: Live Gaze Tracking. We will extract the normalized center coordinates of the YOLOv8 person bounding box on the backend and broadcast them via WebSocket. The frontend 3D canvas will intercept these coordinates to smoothly rotate the humanoid bust's head using linear interpolation, simulating the AI making eye contact by tracking the user's physical movements.
+
+## Proposed Changes
+
+### Backend Updates
+
+#### [MODIFY] [detector.py](file:///D:/AI%20ML%20Project/backend/app/perception/detector.py)
+- In the `process_frame` method, when a person is detected by YOLOv8, calculate the center `(x, y)` of the bounding box.
+- Normalize these coordinates to a scale of `-1.0` to `1.0` based on the frame dimensions (`w`, `h`).
+- Add the `gaze_x` and `gaze_y` properties to the returned dictionary.
+
+#### [MODIFY] [websocket.py](file:///D:/AI%20ML%20Project/backend/app/api/websocket.py)
+- Inside the WebSocket `receive_bytes` handler, intercept the result from `process_frame`.
+- Broadcast a new WebSocket JSON event directly to the frontend: `{"type": "gaze", "x": gaze_x, "y": gaze_y}`.
+
+### Frontend Updates
+
+#### [MODIFY] [App.jsx](file:///D:/AI%20ML%20Project/frontend/src/App.jsx)
+- Create a `targetGazeRef = useRef({ x: 0, y: 0 })` to catch the gaze coordinates without triggering unnecessary React re-renders.
+- Update the WebSocket `addMessageListener` to parse `type === 'gaze'` messages and update the `targetGazeRef.current`.
+- Pass `targetGazeRef` down as a prop to the `<Hologram>` component.
+
+#### [MODIFY] [Hologram.jsx](file:///D:/AI%20ML%20Project/frontend/src/components/Hologram.jsx)
+- Import `useFrame` from `@react-three/fiber` and `* as THREE from 'three'`.
+- Accept the `gazeRef` prop.
+- Inside `HologramModel`, create `headRef = useRef()` and attach it to the `<mesh>` containing the `<sphereGeometry>` (the head).
+- Implement the `useFrame` hook to apply linear interpolation (`THREE.MathUtils.lerp`) to the `headRef.current.rotation.x` and `.y` based on the coordinates in `gazeRef.current`.
+
+## Verification Plan
+
+### Automated Steps
+- No new dependencies need to be installed.
+
+### Manual Verification
+- Move left, right, up, and down in front of the webcam.
+- The YOLOv8 perception feed should detect the bounding box, and the frontend 3D bust should smoothly rotate its head to follow the bounding box center without any jitter.

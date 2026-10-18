@@ -1,0 +1,111 @@
+# Implementation Plan - Phase 9 (Subphase 9.4): Sentence-Boundary Streaming for Sub-Second Audio Latency
+
+## Overview
+Currently, the AI companion pipeline incurs high Time-to-First-Audio (TTFA) because it waits for the entire LLM response to complete and then synthesizes the entire response block with Edge-TTS before sending audio over WebSocket.
+
+Subphase 9.4 introduces **token-level streaming and sentence-boundary chunking**:
+1. Tokens stream asynchronously from the LLM via LangChain's `model.astream()`.
+2. A sentence accumulator buffer detects natural sentence boundaries (`.`, `!`, `?`, `\n\n`) while filtering out abbreviations (`Dr.`, `e.g.`) and decimal numbers (`3.14`).
+3. An asynchronous producer-consumer pipeline pipes each assembled sentence immediately into `edge_tts.Communicate`.
+4. As each sentence finishes synthesizing, its audio bytes are dispatched over the WebSocket with streaming metadata (`chunk_index`, `accumulated_text`, `is_final`).
+5. The frontend maintains an audio playback queue to seamlessly transition from sentence to sentence with zero audio stutter or overlap, while live subtitle text dynamically appends each sentence as it arrives.
+6. Gesture interruption (open palm) cleanly aborts the LLM token stream, cancels any queued TTS synthesis, flushes the frontend audio buffer, and halts playback immediately.
+
+---
+
+## User Review Required
+
+> [!IMPORTANT]
+> **WebSocket Protocol Compatibility**: We preserve backward compatibility on the WebSocket event format. The event remains `type: "ai_audio_response"`, augmented with `chunk_index`, `accumulated_text`, and `is_final: boolean`.
+> If an error or non-streamed response occurs, `is_final: true` is sent on chunk 0.
+
+> [!NOTE]
+> **Frontend Audio Queue**: The frontend `HTMLAudioElement` can only play one audio stream at a time. The frontend will implement an internal audio chunk FIFO queue. When sentence 0 ends (`onended`), sentence 1 starts immediately, ensuring continuous speech without interruption.
+
+---
+
+## Proposed Changes
+
+### Backend Cognition Engine
+
+#### [MODIFY] [backend/app/cognition/engine.py](file:///D:/AI%20ML%20Project/backend/app/cognition/engine.py)
+- Implement `find_sentence_boundary(buffer: str) -> int`:
+  - Recognizes sentence terminators: `.`, `!`, `?`, `\n\n`.
+  - Avoids false splits on abbreviations (`dr`, `mr`, `mrs`, `ms`, `prof`, `sr`, `jr`, `vs`, `etc`, `eg`, `ie`, `approx`, `inc`, `ltd`).
+  - Avoids false splits on decimal numbers (e.g. `3.14`, `0.5`).
+  - Handles ellipses (`...`).
+- Implement `astream_sentences(...) -> AsyncGenerator[Tuple[str, str], None]`:
+  - Routes query to the optimal candidate model (Groq, Gemini, Nemotron, Vision).
+  - Uses `model.astream(messages)` to stream tokens.
+  - Feeds tokens into a rolling buffer and yields `(sentence, model_name)` immediately whenever a boundary is reached.
+  - Flushes remaining buffer content upon completion.
+  - Updates `conversation_history` with the full combined reply.
+  - Respects `self.abort_requested` on every token and yields immediately on interruption.
+- Maintain existing `synthesize_speech` and `abort_generation` logic.
+
+---
+
+### Backend WebSocket API
+
+#### [MODIFY] [backend/app/api/websocket.py](file:///D:/AI%20ML%20Project/backend/app/api/websocket.py)
+- Upgrade `background_llm_task`:
+  - Initialize an `asyncio.Queue` for sentence chunks.
+  - **Producer Task**: Asynchronously iterates over `cognition.astream_sentences()` and puts sentences into the queue.
+  - **Consumer Worker**: Pulls each sentence from the queue as soon as it is ready, synthesizes audio via `cognition.synthesize_speech(sentence)`, base64-encodes the bytes, and immediately dispatches an `ai_audio_response` WebSocket message with:
+    ```python
+    {
+        "type": "ai_audio_response",
+        "payload": {
+            "chunk_index": chunk_idx,
+            "text": sentence,
+            "accumulated_text": full_text_so_far,
+            "audio": speech_b64,
+            "state": "speaking",
+            "model": model_name,
+            "is_final": is_final,
+            "timestamp": time.time(),
+        }
+    }
+    ```
+  - Emits `ai_state: "speaking"` upon first chunk delivery.
+  - Emits final marker (`is_final: True`) when all sentences have completed.
+  - Abort handling: If an open-palm gesture or interrupt fires, `cognition.abort_requested` triggers immediate termination of the producer and consumer, draining the queue without further synthesis.
+
+---
+
+### Frontend UI & Audio Playback Queue
+
+#### [MODIFY] [frontend/src/App.jsx](file:///D:/AI%20ML%20Project/frontend/src/App.jsx)
+- **Audio Playback Queue**:
+  - Introduce `audioQueueRef = useRef([])` and `isAudioPlayingRef = useRef(false)`.
+  - Implement `playNextAudioChunk()`:
+    - If queue is empty: resets state to `idle`, `isAudioPlayingRef = false`, `volumeRef = 0`.
+    - Pops next chunk, sets `audioPlayerRef.current.src = "data:audio/mp3;base64," + chunk.audio`.
+    - Handles Web Audio analyzer connection and `.play()`.
+    - On `onended`, immediately invokes `playNextAudioChunk()`.
+- **WebSocket Listener Update**:
+  - On `ai_audio_response`:
+    - Updates `setSubtitle(payload.accumulated_text || payload.text)`.
+    - Appends chunk to `audioQueueRef`.
+    - Triggers `playNextAudioChunk()` if not already playing.
+- **Audio Interruption & Flush**:
+  - `stopAudioPlayback()` flushes `audioQueueRef.current = []`, resets `isAudioPlayingRef.current = false`, halts the audio player, resets volume, and sets state to `idle`.
+
+---
+
+## Verification Plan
+
+### Automated Benchmark Tests
+- Run `scratch/test_pipelined_stream.py` directly using Python 3.11 venv to measure:
+  - Time-to-First-Token (TTFT)
+  - Time-to-First-Sentence (TTFS)
+  - Time-to-First-Audio (TTFA)
+- Run unit tests on `find_sentence_boundary` covering edge cases (`Dr.`, `3.14`, `\n\n`, `!`, `?`).
+
+### End-to-End Build & Interface Verification
+- Run `npm run build` in `frontend/` to confirm zero lint/syntax errors.
+- Query test: Send a multi-sentence prompt (e.g. *"Explain why planets orbit stars in three sentences"*).
+  - Verify audio starts speaking the first sentence within ~1-1.5 seconds.
+  - Verify sentence 2 and 3 play consecutively without clipping or gaps.
+  - Verify 3D bust emissive pulsing continues seamlessly across sentence chunks.
+  - Verify open palm gesture instantly cancels audio playback and clears the queue.

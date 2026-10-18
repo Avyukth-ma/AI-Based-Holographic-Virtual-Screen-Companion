@@ -1,0 +1,41 @@
+# --- Environments & Dependencies ---
+venv/
+.venv/
+backend/venv/
+node_modules/
+frontend/node_modules/
+
+# --- Environment Variables & Secrets ---
+.env
+backend/.env
+frontend/.env
+*.env.local
+
+# --- Model Weights & Large Binaries ---
+*.pt
+*.task
+*.onnx
+*.bin
+backend/yolov8n.pt
+backend/gesture_recognizer.task
+
+# --- Build & Runtime Artifacts ---
+dist/
+frontend/dist/
+build/
+*.egg-info/
+__pycache__/
+*/__pycache__/
+*/*/__pycache__/
+*.py[cod]
+*$py.class
+
+# --- IDE, System & Temporary Files ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+scratch/
+*/scratch/
+.system_generated/

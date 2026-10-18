@@ -1,0 +1,68 @@
+# Walkthrough: Fix Perception Context Injection and Math Formatting
+
+## 1. Problem Overview & Root Cause Analysis
+
+### A. Camera Perception Context Hallucination
+* **Root Cause**: In [websocket.py](file:///D:/AI%20ML%20Project/backend/app/api/websocket.py), the context injection block was evaluating `faces_count = len(latest_perception.get("faces", []))`. However, the detection pipeline in [detector.py](file:///D:/AI%20ML%20Project/backend/app/perception/detector.py) tracks people via YOLOv8 in the `"persons"` array and tracks gaze via `"gaze_x"` / `"gaze_y"`, leaving `"faces"` permanently empty (`[]`). Because `faces_count` was always `0`, `vc_str` evaluated unconditionally to `"No user visible currently."`, prompting the LLM to hallucinate: *"I don't see you in front of the camera."*
+
+### B. Math Equations Rendering as Flat Text Without LaTeX
+* **Root Cause 1 (Formatting Crash)**: In [engine.py](file:///D:/AI%20ML%20Project/backend/app/cognition/engine.py), calling `prompt_template.format(visual_context=visual_context)` failed with `ValueError: unexpected '{' in field name` because `SYSTEM_PROMPT_REASONING` contained LaTeX curly braces (e.g. `\frac{...}{...}`). This caused all reasoning candidates (Groq, Gemini, Nemotron) to crash during inference and drop into offline fallback.
+* **Root Cause 2 (Delimiter Ingestion & Sanitization)**: Models like Groq frequently output LaTeX with `\[ ... \]` and `\( ... \)`. The frontend markdown parser ([App.jsx](file:///D:/AI%20ML%20Project/frontend/src/App.jsx)) uses `remark-math` and `rehype-katex`, which require standard `$` for inline math and `$$` for block math. Furthermore, sentence boundary splitting previously could split inside unclosed math expressions, fragmenting formulas.
+
+---
+
+## 2. Key Changes Implemented
+
+### 1. Backend Perception Context Logic ([backend/app/api/websocket.py](file:///D:/AI%20ML%20Project/backend/app/api/websocket.py))
+- Updated both `text_message` and `victory` gesture handlers to accurately evaluate `person_count` from both `persons` and `faces`, while also checking `user_present` and `gaze_x` presence:
+  ```python
+  latest_perception = meta.get("latest_perception", {})
+  persons_data = latest_perception.get("persons", [])
+  faces_data = latest_perception.get("faces", [])
+  person_count = len(persons_data) if persons_data else len(faces_data)
+  hands_data = latest_perception.get("hands", [])
+  gesture_val = hands_data[0].get("gesture", "None") if hands_data else "None"
+  gaze_x = latest_perception.get("gaze_x")
+  gaze_y = latest_perception.get("gaze_y")
+  has_gaze = gaze_x is not None and (gaze_x != 0.0 or gaze_y != 0.0 or person_count > 0)
+  user_present = latest_perception.get("user_present", False) or person_count > 0 or has_gaze
+
+  if person_count > 0 or has_gaze or user_present or gesture_val != "None":
+      effective_count = max(person_count, 1)
+      gaze_detail = f" (gaze coordinates: x={gaze_x:.2f}, y={gaze_y:.2f})" if (gaze_x is not None and (gaze_x != 0.0 or gaze_y != 0.0)) else ""
+      vc_str = f"User is present in front of the camera ({effective_count} person(s) detected{gaze_detail}; Active Gesture: {gesture_val})."
+  else:
+      vc_str = "I don't see you in front of the camera."
+  ```
+
+### 2. Strict LaTeX Math Instruction & Delimiter Enforcement ([backend/app/cognition/engine.py](file:///D:/AI%20ML%20Project/backend/app/cognition/engine.py))
+- **Enforced Strict Instruction** in `SYSTEM_PROMPT_GENERAL`, `SYSTEM_PROMPT_REASONING`, and `SYSTEM_PROMPT_VISION`:
+  > *"You must use LaTeX for all math equations. Enclose inline math using a single $ and block equations using $$. Never output raw unformatted polynomials."*
+- **Fixed System Prompt Formatting**: Replaced `.format(visual_context=...)` with `.replace("{visual_context}", visual_context)` across `generate_llm_response` and `astream_sentences`, completely preventing Python `ValueError` or `KeyError` crashes when LaTeX formulas contain `{...}` braces.
+- **Added LaTeX Delimiter Normalization** in `clean_math_text`: Automatically translates `\[ ... \]` to `$$ ... $$` and `\( ... \)` to `$ ... $`, ensuring full compatibility with KaTeX and `remark-math` in the frontend.
+- **Protected Sentence Boundaries**: Updated `find_sentence_boundary` to prevent splitting on periods inside unclosed `$`, `$$`, `\[`, or `\(` math equations.
+- **Speech Synthesis Sanitation**: Updated `synthesize_speech` so that Edge-TTS parses mathematical expressions cleanly (e.g. `\frac{a}{b}` -> `a over b`, `\sqrt{x}` -> `square root of x`) and strips dollar signs so the TTS synthesizer doesn't pronounce raw `$` symbols aloud.
+
+---
+
+## 3. Verification & Validation Results
+
+### 1. Perception Logic Unit Tests
+- **Test 1a (YOLO Person + Gaze Coordinates)**: Evaluated to `User is present in front of the camera (1 person(s) detected (gaze coordinates: x=0.12, y=-0.05); Active Gesture: None).`
+- **Test 1b (Gaze Only Presence)**: Evaluated to `User is present in front of the camera (1 person(s) detected (gaze coordinates: x=-0.34, y=0.21); Active Gesture: None).`
+- **Test 1c (No User Present)**: Evaluated accurately to `"I don't see you in front of the camera."`
+
+### 2. End-to-End WebSocket Streaming & LaTeX Math Test
+- Connected to `ws://127.0.0.1:8000/ws/companion`.
+- Queried: `"What is the quadratic formula?"`
+- **Results**:
+  - Route successfully classified as `reasoning`.
+  - Groq Ultra-Fast (120B) streamed real-time sentence-by-sentence chunks.
+  - Math block equations formatted cleanly with `$$` (e.g., `$$ax^2 + bx + c = 0$$` and `$$x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$$`).
+  - Inline variables formatted with `$` (e.g., `$x$`, `$a \neq 0$`).
+  - Edge-TTS synthesized audio payloads for each streamed chunk.
+  - Zero hallucination regarding the user missing from the camera.
+
+### 3. Server Status
+- **FastAPI Backend**: Running at `http://127.0.0.1:8000` (Health check: HTTP 200 `{"status":"healthy","service":"Multimodal AI Companion"}`).
+- **Vite Frontend**: Running at `http://localhost:5173` (HTTP 200).
