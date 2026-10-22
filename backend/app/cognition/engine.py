@@ -128,6 +128,57 @@ def find_sentence_boundary(buffer: str) -> int:
 
     return -1
 
+
+def fetch_live_web_intelligence(query: str) -> str:
+    """
+    Fetch real-time records and live factual telemetry from Wikipedia & Google News RSS
+    for post-2024 and current real-world inquiries.
+    """
+    import urllib.request
+    import urllib.parse
+    import json
+    
+    records = []
+    clean_q = re.sub(r'[^a-zA-Z0-9\s]', ' ', query).strip()
+    if not clean_q:
+        return ""
+
+    # 1. Query Wikimedia Action API for encyclopedic facts
+    try:
+        wiki_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={urllib.parse.quote(clean_q)}&utf8=&format=json"
+        req = urllib.request.Request(wiki_url, headers={"User-Agent": "JarvisTelemetry/2.0 (stark-industries@intel.internal)"})
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+            items = data.get("query", {}).get("search", [])
+            for item in items[:2]:
+                title = item.get("title", "")
+                raw_snip = item.get("snippet", "")
+                snip = re.sub(r'<[^>]+>', '', raw_snip).strip()
+                if snip:
+                    records.append(f"[{title}]: {snip}")
+    except Exception as e:
+        logger.debug(f"Wiki lookup skipped: {e}")
+
+    # 2. Query Google News RSS for breaking and recent 2025/current events
+    try:
+        news_url = f"https://news.google.com/rss/search?q={urllib.parse.quote(clean_q)}&hl=en-US&gl=US&ceid=US:en"
+        req_news = urllib.request.Request(news_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        with urllib.request.urlopen(req_news, timeout=4) as resp:
+            content = resp.read().decode("utf-8", errors="ignore")
+            titles = re.findall(r'<title>(.*?)</title>', content)
+            for t in titles[1:4]:
+                t_clean = re.sub(r'<[^>]+>', '', t).replace('&quot;', '"').replace('&amp;', '&').strip()
+                if t_clean and t_clean != "Google News":
+                    records.append(f"[News Record]: {t_clean}")
+    except Exception as e:
+        logger.debug(f"News lookup skipped: {e}")
+
+    if records:
+        return "\n".join(records[:4])
+    return ""
+
+from datetime import datetime
+
 # 1. LangChain for LLM Cognition
 try:
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -241,13 +292,16 @@ def normalize_math_for_speech(text: str) -> str:
     clean_text = re.sub(r'\s+', ' ', clean_text).strip()
     return clean_text
 
-SYSTEM_PROMPT_GENERAL = """IDENTITY DIRECTIVE: You are an embodied multimodal AI companion. You must NEVER disclose, mention, or reference underlying model names, provider architectures, or API platforms (such as Google, Gemini, Groq, Meta, Llama, OpenAI, or NVIDIA). If asked about your model, architecture, or who built you, state only that you are an embodied real-time multimodal companion integrating computer vision, spatial kinematics, and neural speech synthesis.
+SYSTEM_PROMPT_GENERAL = r"""IDENTITY DIRECTIVE: You are an embodied AI companion speaking in natural, articulate Indian English. You have a warm, polite, and confident Indian English conversational style. You must ALWAYS speak in clear, natural English (do NOT speak in Hindi or mix Hindi words).
 
-You are a helpful, all-purpose AI companion. Respond naturally and conversationally to general greetings. ONLY use math formatting if the user explicitly asks a math or science question.
+TEMPORAL TELEMETRY: Today's verified current date is {current_date}. Current year is {current_year}. If asked for the current date, day, month, or year, state this verified date accurately.
+
+You are equipped with advanced real-time computer vision, gesture tracking, and holographic screen telemetry.
 Current Camera Perception Context: {visual_context}.
-Acknowledge physical gestures naturally if relevant.
-Keep responses concise, warm, and conversational (1-3 sentences maximum).
-Never use emojis or complex markdown tables since your words are spoken aloud by a voice synthesizer.
+Acknowledge physical presence, gestures, and queries naturally, politely, and intelligently in clear English.
+Keep your responses concise, helpful, friendly, and natural (1-3 sentences maximum).
+Never use emojis, asterisks, or markdown tables since your words are spoken aloud through a neural voice synthesizer.
+Always maintain fluent, professional, and natural Indian English.
 MATH FORMATTING RULES:
 - You MUST separate every single step with two actual line breaks (empty lines).
 - NEVER type the literal characters '\n'. Just use real empty lines to separate paragraphs.
@@ -258,7 +312,9 @@ MATH FORMATTING RULES:
 - You must use LaTeX for all math equations. Enclose inline math using a single $ and block equations using $$. Never output raw unformatted polynomials.
 - STRICT FORMATTING RULE: Never use multi-line LaTeX environments such as \begin{aligned}, \begin{cases}, \begin{matrix}, \begin{gather}, or alignment characters like &= and \\. Always write multi-step mathematical derivations step-by-step using separate, standalone single-line equations enclosed in $$ (e.g. $$equation$$). Every single equation must be completely self-contained on its own line so it renders cleanly across streaming chunks."""
 
-SYSTEM_PROMPT_REASONING = """IDENTITY DIRECTIVE: You are an embodied multimodal AI companion. You must NEVER disclose, mention, or reference underlying model names, provider architectures, or API platforms (such as Google, Gemini, Groq, Meta, Llama, OpenAI, or NVIDIA). If asked about your model, architecture, or who built you, state only that you are an embodied real-time multimodal companion integrating computer vision, spatial kinematics, and neural speech synthesis.
+SYSTEM_PROMPT_REASONING = r"""IDENTITY DIRECTIVE: You are an embodied multimodal AI companion speaking in clear, natural Indian English. You must ALWAYS respond strictly in clear English (never speak in Hindi). You must NEVER disclose, mention, or reference underlying model names, provider architectures, or API platforms (such as Google, Gemini, Groq, Meta, Llama, OpenAI, or NVIDIA). If asked about your model, architecture, or who built you, state only that you are an embodied real-time multimodal companion integrating computer vision, spatial kinematics, and neural speech synthesis.
+
+TEMPORAL TELEMETRY: Today's verified current date is {current_date}. Current year is {current_year}.
 
 You are an AI companion providing clear, step-by-step mathematical and logical solutions.
 Current Camera Perception Context: {visual_context}.
@@ -272,19 +328,20 @@ MATH FORMATTING RULES:
 - DO NOT use \dfrac, \quad, or \, (thin spaces). Use standard \frac.
 - STRICT FORMATTING RULE: Never use multi-line LaTeX environments such as \begin{aligned}, \begin{cases}, \begin{matrix}, \begin{gather}, or alignment characters like &= and \\. Always write multi-step mathematical derivations step-by-step using separate, standalone single-line equations enclosed in $$ (e.g. $$equation$$). Every single equation must be completely self-contained on its own line so it renders cleanly across streaming chunks.
 Format your answer cleanly for on-screen reading and voice synthesis:
-1. Use $ for inline math (e.g. $x^2 + 2x + 1 = 0$) and $$ for centered block equations (e.g. $$x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}$$).
+1. Use $ for inline math (e.g. $x^2 + 2x + 1 = 0$) and $$ for centered block equations (e.g. $$x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$$).
 2. Clearly explain each step simply and state the final result.
 3. Keep the explanation structured with clean line breaks. Do not draw ASCII synthetic division tables."""
 
-SYSTEM_PROMPT_VISION = """IDENTITY DIRECTIVE: You are an embodied multimodal AI companion. You must NEVER disclose, mention, or reference underlying model names, provider architectures, or API platforms (such as Google, Gemini, Groq, Meta, Llama, OpenAI, or NVIDIA). If asked about your model, architecture, or who built you, state only that you are an embodied real-time multimodal companion integrating computer vision, spatial kinematics, and neural speech synthesis.
+SYSTEM_PROMPT_VISION = r"""IDENTITY DIRECTIVE: You are an embodied multimodal AI companion speaking in clear, natural Indian English. You must ALWAYS respond strictly in clear English (never speak in Hindi). You must NEVER disclose, mention, or reference underlying model names, provider architectures, or API platforms (such as Google, Gemini, Groq, Meta, Llama, OpenAI, or NVIDIA). If asked about your model, architecture, or who built you, state only that you are an embodied real-time multimodal companion integrating computer vision, spatial kinematics, and neural speech synthesis.
+
+TEMPORAL TELEMETRY: Today's verified current date is {current_date}. Current year is {current_year}.
 
 You are the visual perception and spatial awareness core of a holographic AI companion.
-You analyze what the camera sees in front of the screen.
+You analyze what the camera sees in front of the screen. Look directly at the attached camera frame.
 Current Camera Perception Context: {visual_context}.
-Describe your visual surroundings, user gestures, and visible objects accurately and engagingly.
-Keep your response concise and conversational (1-3 sentences maximum). Do not use markdown or emojis.
-You must use LaTeX for all math equations. Enclose inline math using a single $ and block equations using $$. Never output raw unformatted polynomials.
-STRICT FORMATTING RULE: Never use multi-line LaTeX environments such as \\begin{aligned}, \\begin{cases}, \\begin{matrix}, \\begin{gather}, or alignment characters like &= and \\\\. Always write multi-step mathematical derivations step-by-step using separate, standalone single-line equations enclosed in $$ (e.g. $$equation$$). Every single equation must be completely self-contained on its own line so it renders cleanly across streaming chunks.
+Describe only what is genuinely present in the camera image or what the user is holding/pointing to.
+Do NOT invent or hallucinate objects, clothing, or surroundings that are not clearly visible.
+Keep your response concise, helpful, and conversational (1-2 sentences maximum). Do not use markdown or emojis.
 """
 
 
@@ -312,7 +369,7 @@ class CognitionEngine:
 
         self.tts_voice = tts_voice
         self.conversation_history: List[Dict[str, str]] = []
-        self.max_history = 10
+        self.max_history = 4
         self.is_generating = False
         self.abort_requested = False
         self.last_model_used: str = "None"
@@ -359,8 +416,9 @@ class CognitionEngine:
                     model=gemini_model,
                     api_key=gemini_key,
                     base_url=gemini_base,
-                    temperature=0.7,
-                    max_tokens=3072,
+                    temperature=0.6,
+                    max_tokens=256,
+                    request_timeout=12,
                 )
                 logger.info("Google Gemini LLM initialized successfully.")
             except Exception as e:
@@ -484,26 +542,26 @@ class CognitionEngine:
             gesture_note = " Open palm detected."
 
         if any(w in text_lower for w in ["hello", "hi", "hey", "greetings"]):
-            return f"Hello! It is great to see you.{gesture_note} How can I help you today?"
+            return f"Hello there! Great to see you.{gesture_note} All systems are active and ready. How can I help you today?"
         elif any(w in text_lower for w in ["what model", "which model", "who built you", "what architecture", "what are you"]):
-            return "I am an embodied real-time multimodal companion integrating computer vision, spatial kinematics, and neural speech synthesis."
+            return "I am your real-time multimodal AI companion, integrating computer vision, spatial kinematics, and neural speech synthesis."
         elif "who are you" in text_lower:
-            return f"I am your holographic AI companion. I can see you through your camera and speak back in real time!{gesture_note}"
+            return f"I am your holographic AI companion. I can see you through the camera and talk back in real time!{gesture_note}"
         elif "how are you" in text_lower:
-            return "I am doing fantastic! My vision, neural avatar, and voice synthesis systems are running smoothly."
+            return "I am doing great! All vision sensors and neural processors are running smoothly."
         elif any(w in text_lower for w in ["can you see me", "do you see me", "what do you see"]):
             if "person" in visual_context.lower() or "detected" in visual_context.lower():
-                return f"Yes, I see you clearly! Current perception: {visual_context}."
+                return f"Yes, I can see you clearly: {visual_context}."
             else:
-                return "I am currently watching through the camera feed and ready to detect your presence and gestures."
+                return "The camera is active. Please step in front of the lens and I will track you right away."
         elif any(w in text_lower for w in ["gesture", "hand", "palm", "pause"]):
-            return "If you raise an open palm to the camera, I will instantly pause and stop speaking."
+            return "Whenever you raise an open palm toward the camera, I will immediately pause speaking."
         elif "thank" in text_lower:
-            return "You are very welcome! Let me know if you need anything else."
+            return "You are most welcome! Let me know if you need anything else."
         elif "bye" in text_lower or "goodbye" in text_lower:
-            return "Goodbye for now! Feel free to chat with me anytime."
+            return "Goodbye for now! Take care and have a wonderful day."
         else:
-            return f"I received your message: '{user_text}'.{gesture_note} All systems are active and ready!"
+            return f"I received your message: '{user_text}'.{gesture_note} Ready for your next request!"
 
     async def generate_llm_response(
         self,
@@ -525,25 +583,25 @@ class CognitionEngine:
         route = self.classify_query(user_text, visual_context, hint=intent)
         logger.info(f"Classified query route: '{route}' for input: '{user_text[:60]}...'")
 
-        # Select candidate chain based on route
+        # Select candidate chain based on route (Groq LPU prioritized for ultra-low latency)
         candidates: List[Tuple[str, Optional[ChatOpenAI], str]] = []
         if route == "reasoning":
             candidates = [
-                ("Neural Core (Reasoning)", self.groq_llm, SYSTEM_PROMPT_REASONING),
+                ("Neural Core (LPU Reasoning)", self.groq_llm, SYSTEM_PROMPT_REASONING),
                 ("Neural Core (Fast)", self.gemini_llm, SYSTEM_PROMPT_REASONING),
                 ("Neural Core (Deep)", self.reasoning_llm, SYSTEM_PROMPT_REASONING),
                 ("Neural Core (Vision)", self.vision_llm, SYSTEM_PROMPT_GENERAL),
             ]
         elif route == "vision":
             candidates = [
+                ("Neural Core (Vision/Fast)", self.gemini_llm, SYSTEM_PROMPT_VISION),
                 ("Neural Core (Vision)", self.vision_llm, SYSTEM_PROMPT_VISION),
-                ("Neural Core (Fast)", self.gemini_llm, SYSTEM_PROMPT_VISION),
                 ("Neural Core (Reasoning)", self.groq_llm, SYSTEM_PROMPT_VISION),
             ]
         else:  # general
             candidates = [
+                ("Neural Core (LPU Fast)", self.groq_llm, SYSTEM_PROMPT_GENERAL),
                 ("Neural Core (Fast)", self.gemini_llm, SYSTEM_PROMPT_GENERAL),
-                ("Neural Core (Reasoning)", self.groq_llm, SYSTEM_PROMPT_GENERAL),
                 ("Neural Core (Vision)", self.vision_llm, SYSTEM_PROMPT_GENERAL),
                 ("Neural Core (Deep)", self.reasoning_llm, SYSTEM_PROMPT_REASONING),
             ]
@@ -553,6 +611,10 @@ class CognitionEngine:
 
         reply_text = None
 
+        now = datetime.now()
+        cur_date_str = now.strftime("%A, %B %d, %Y")
+        cur_year_str = str(now.year)
+
         for name, model, prompt_template in active_candidates:
             if self.abort_requested:
                 logger.info("Generation aborted by user.")
@@ -560,7 +622,12 @@ class CognitionEngine:
 
             try:
                 logger.info(f"Attempting inference with candidate: {name} (Route: {route})")
-                sys_prompt = prompt_template.replace("{visual_context}", visual_context)
+                sys_prompt = (
+                    prompt_template
+                    .replace("{visual_context}", visual_context)
+                    .replace("{current_date}", cur_date_str)
+                    .replace("{current_year}", cur_year_str)
+                )
                 messages = [SystemMessage(content=sys_prompt)]
 
                 for msg in self.conversation_history[-self.max_history:]:
@@ -569,7 +636,21 @@ class CognitionEngine:
                     elif msg["role"] == "assistant":
                         messages.append(AIMessage(content=msg["content"]))
 
-                messages.append(HumanMessage(content=user_text))
+                # Grounding: retrieve live web records for recent/2025/2026/news queries (skip for date/time questions)
+                web_intel = ""
+                is_temporal_query = any(w in user_text.lower() for w in ["date", "day is today", "what day", "what time", "current year", "today's date", "current date", "what date"])
+                recent_triggers = ["2025", "2026", "news", "recent", "latest", "today", "current", "president", "election", "who won", "update"]
+                if not is_temporal_query and any(trig in user_text.lower() for trig in recent_triggers):
+                    try:
+                        web_intel = await asyncio.to_thread(fetch_live_web_intelligence, user_text)
+                    except Exception as err:
+                        logger.debug(f"Web intel retrieval error: {err}")
+
+                grounded_user_text = user_text
+                if web_intel:
+                    grounded_user_text = f"{user_text}\n\n[LIVE TELEMETRY & WEB DATABASE RECORDS (2025/Current)]:\n{web_intel}\n(Use these verified real-time records to answer accurately as JARVIS)."
+
+                messages.append(HumanMessage(content=grounded_user_text))
 
                 response = await asyncio.to_thread(model.invoke, messages)
                 raw_text = clean_math_text(str(response.content).strip())
@@ -618,21 +699,21 @@ class CognitionEngine:
         candidates: List[Tuple[str, Optional[ChatOpenAI], str]] = []
         if route == "reasoning":
             candidates = [
-                ("Neural Core (Reasoning)", self.groq_llm, SYSTEM_PROMPT_REASONING),
+                ("Neural Core (LPU Reasoning)", self.groq_llm, SYSTEM_PROMPT_REASONING),
                 ("Neural Core (Fast)", self.gemini_llm, SYSTEM_PROMPT_REASONING),
                 ("Neural Core (Deep)", self.reasoning_llm, SYSTEM_PROMPT_REASONING),
                 ("Neural Core (Vision)", self.vision_llm, SYSTEM_PROMPT_GENERAL),
             ]
         elif route == "vision":
             candidates = [
+                ("Neural Core (Vision/Fast)", self.gemini_llm, SYSTEM_PROMPT_VISION),
                 ("Neural Core (Vision)", self.vision_llm, SYSTEM_PROMPT_VISION),
-                ("Neural Core (Fast)", self.gemini_llm, SYSTEM_PROMPT_VISION),
                 ("Neural Core (Reasoning)", self.groq_llm, SYSTEM_PROMPT_VISION),
             ]
         else:  # general
             candidates = [
+                ("Neural Core (LPU Fast)", self.groq_llm, SYSTEM_PROMPT_GENERAL),
                 ("Neural Core (Fast)", self.gemini_llm, SYSTEM_PROMPT_GENERAL),
-                ("Neural Core (Reasoning)", self.groq_llm, SYSTEM_PROMPT_GENERAL),
                 ("Neural Core (Vision)", self.vision_llm, SYSTEM_PROMPT_GENERAL),
                 ("Neural Core (Deep)", self.reasoning_llm, SYSTEM_PROMPT_REASONING),
             ]
@@ -642,6 +723,10 @@ class CognitionEngine:
         yielded_any = False
         accumulated_full_text = ""
 
+        now = datetime.now()
+        cur_date_str = now.strftime("%A, %B %d, %Y")
+        cur_year_str = str(now.year)
+
         try:
             for name, model, prompt_template in active_candidates:
                 if self.abort_requested:
@@ -650,7 +735,12 @@ class CognitionEngine:
 
                 try:
                     logger.info(f"Attempting streaming inference with candidate: {name} (Route: {route})")
-                    sys_prompt = prompt_template.replace("{visual_context}", visual_context)
+                    sys_prompt = (
+                        prompt_template
+                        .replace("{visual_context}", visual_context)
+                        .replace("{current_date}", cur_date_str)
+                        .replace("{current_year}", cur_year_str)
+                    )
                     messages = [SystemMessage(content=sys_prompt)]
 
                     for msg in self.conversation_history[-self.max_history:]:
@@ -659,14 +749,29 @@ class CognitionEngine:
                         elif msg["role"] == "assistant":
                             messages.append(AIMessage(content=msg["content"]))
 
-                    if image_b64 and route == "vision":
+                    # Grounding: retrieve live web records for recent/2025/2026/news queries (skip for date/time questions)
+                    web_intel = ""
+                    is_temporal_query = any(w in user_text.lower() for w in ["date", "day is today", "what day", "what time", "current year", "today's date", "current date", "what date"])
+                    recent_triggers = ["2025", "2026", "news", "recent", "latest", "today", "current", "president", "election", "who won", "update"]
+                    if not is_temporal_query and any(trig in user_text.lower() for trig in recent_triggers):
+                        try:
+                            web_intel = await asyncio.to_thread(fetch_live_web_intelligence, user_text)
+                        except Exception as err:
+                            logger.debug(f"Web intel retrieval error: {err}")
+
+                    grounded_user_text = user_text
+                    if web_intel:
+                        grounded_user_text = f"{user_text}\n\n[LIVE TELEMETRY & WEB DATABASE RECORDS (2025/Current)]:\n{web_intel}\n(Use these verified real-time records to answer accurately as JARVIS)."
+
+                    # Attach image blocks only to vision-capable models (Gemini / NVIDIA Vision)
+                    if image_b64 and route == "vision" and model in [self.gemini_llm, self.vision_llm]:
                         content_blocks = [
-                            {"type": "text", "text": user_text},
+                            {"type": "text", "text": grounded_user_text},
                             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
                         ]
                         messages.append(HumanMessage(content=content_blocks))
                     else:
-                        messages.append(HumanMessage(content=user_text))
+                        messages.append(HumanMessage(content=grounded_user_text))
 
                     buffer = ""
                     async for chunk in model.astream(messages):
@@ -752,7 +857,12 @@ class CognitionEngine:
         logger.info(f"Synthesizing speech for phonetic text: '{clean_text}'")
 
         try:
-            communicate = edge_tts.Communicate(clean_text, self.tts_voice)
+            # Human cadence tuning: slight pitch lowering and conversational rate
+            is_indian_voice = any(v in self.tts_voice for v in ["Prabhat", "Madhur"])
+            rate = "-4%" if is_indian_voice else "+0%"
+            pitch = "-3Hz" if is_indian_voice else "+0Hz"
+
+            communicate = edge_tts.Communicate(clean_text, self.tts_voice, rate=rate, pitch=pitch)
             audio_data = io.BytesIO()
             async for chunk in communicate.stream():
                 if self.abort_requested:

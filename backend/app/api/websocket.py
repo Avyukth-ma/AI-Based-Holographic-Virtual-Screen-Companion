@@ -116,7 +116,14 @@ async def background_llm_task(websocket, user_text, vc_str, intent: str = "", im
                 else:
                     full_text_so_far = sentence
 
-                speech_bytes = await cognition.synthesize_speech(sentence)
+                speech_bytes = None
+                try:
+                    speech_bytes = await asyncio.wait_for(cognition.synthesize_speech(sentence), timeout=6.0)
+                except asyncio.TimeoutError:
+                    logger.warning("TTS speech synthesis timed out (>6s); continuing without audio chunk.")
+                except Exception as tts_err:
+                    logger.warning(f"TTS synthesis error: {tts_err}")
+
                 if cognition.abort_requested:
                     logger.info("Synthesis completed but abort was requested; dropping chunk.")
                     break
@@ -185,6 +192,32 @@ async def background_llm_task(websocket, user_text, vc_str, intent: str = "", im
             meta["companion_state"] = "idle"
             meta["active_cognition_task"] = None
 
+async def speak_quick_phrase(websocket: WebSocket, text: str, state: str = "speaking"):
+    """Synthesize and transmit a single fast reactive speech phrase without LLM latency."""
+    cognition = get_cognition_engine()
+    if cognition.abort_requested:
+        return
+    try:
+        speech_bytes = await asyncio.wait_for(cognition.synthesize_speech(text), timeout=3.5)
+        speech_b64 = base64.b64encode(speech_bytes).decode("utf-8") if speech_bytes else None
+        
+        await manager.send_json(websocket, {"type": "ai_state", "payload": {"state": state}})
+        await manager.send_json(websocket, {
+            "type": "ai_audio_response",
+            "payload": {
+                "chunk_index": 0,
+                "text": text,
+                "accumulated_text": text,
+                "audio": speech_b64,
+                "state": state,
+                "model": "Reactive Gesture Engine",
+                "timestamp": time.time(),
+                "is_final": True,
+            },
+        })
+    except Exception as e:
+        logger.warning(f"Failed to play quick reactive phrase: {e}")
+
 @router.websocket("/ws/companion")
 async def websocket_companion_endpoint(websocket: WebSocket):
     """Main WebSocket endpoint for the real-time AI companion."""
@@ -228,6 +261,10 @@ async def websocket_companion_endpoint(websocket: WebSocket):
                         frame_b64 = payload.get("data")
                         client_ts = payload.get("timestamp")
 
+                        # Cache latest frame for vision queries and pointing inspection
+                        if frame_b64:
+                            meta["latest_frame_b64"] = frame_b64
+
                         if not meta.get("is_processing_frame", False) and frame_b64:
                             meta["is_processing_frame"] = True
                             try:
@@ -239,149 +276,108 @@ async def websocket_companion_endpoint(websocket: WebSocket):
                                 hands_data = result.get("hands", [])
                                 gesture_canonical = hands_data[0].get("gesture", "None") if hands_data else "None"
                                 gesture = gesture_canonical if gesture_canonical != "None" else gesture_event
+
+                                # Maintain temporal streak to filter transient single-frame flickers
+                                last_g = meta.get("last_seen_gesture")
+                                if gesture == last_g and gesture not in ["None", "unknown"]:
+                                    meta["gesture_streak"] = meta.get("gesture_streak", 0) + 1
+                                else:
+                                    meta["last_seen_gesture"] = gesture
+                                    meta["gesture_streak"] = 1
+                                streak = meta.get("gesture_streak", 1)
                                 
-                                # Intercept Gestures for System Commands
+                                # Current system awake/sleep state
                                 current_status = meta.get("system_status", "AWAKE")
+                                companion_state = meta.get("companion_state", "idle")
+                                is_busy = companion_state in ["speaking", "thinking"] or getattr(cognition, "is_generating", False)
                                 
-                                # 1. Open Palm -> Pause Audio (Debounced)
+                                # 1. Open Palm -> Unconditional Immediate Pause / Interrupt
                                 if gesture in ["open_palm", "pause"]:
+                                    logger.info("Open Palm detected: Aborting AI output and returning to idle.")
+                                    cognition.abort_generation()
                                     current_llm_task = meta.get("active_cognition_task")
-                                    companion_state = meta.get("companion_state", "idle")
-                                    is_active = (current_llm_task and not current_llm_task.done()) or companion_state in ["speaking", "thinking"] or getattr(cognition, "is_generating", False)
-                                    if is_active:
-                                        logger.info("AI output interrupted.")
-                                        cognition.abort_generation()
-                                        if current_llm_task and not current_llm_task.done():
-                                            current_llm_task.cancel()
-                                        meta["active_cognition_task"] = None
-                                        meta["companion_state"] = "idle"
-                                        await manager.send_json(websocket, {
-                                            "type": "ai_interrupted",
-                                            "payload": {"reason": "gesture_abort", "gesture": "Open Palm", "timestamp": time.time()}
-                                        })
+                                    if current_llm_task and not current_llm_task.done():
+                                        current_llm_task.cancel()
+                                    meta["active_cognition_task"] = None
+                                    meta["companion_state"] = "idle"
+                                    await manager.send_json(websocket, {
+                                        "type": "ai_interrupted",
+                                        "payload": {"reason": "gesture_abort", "gesture": "Open Palm", "timestamp": time.time()}
+                                    })
                                 
-                                # 2. Fist -> Sleep/Standby
+                                # 2. Fist -> Sleep/Standby (Held for >= 1.0 second)
                                 elif gesture in ["fist", "stop"]:
                                     if meta.get("fist_start_time") is None:
                                         meta["fist_start_time"] = time.time()
-                                    elif time.time() - meta["fist_start_time"] >= 2.0 and current_status == "AWAKE" and meta.get("companion_state") != "sleep":
-                                        logger.info("Standby Mode Activated (Fist Hold 2s)")
+                                    elif time.time() - meta["fist_start_time"] >= 1.0 and current_status == "AWAKE" and meta.get("companion_state") != "sleep":
+                                        logger.info("Standby Mode Activated (Fist Hold 1.0s)")
                                         meta["system_status"] = "SLEEPING"
+                                        cognition.abort_generation()
                                         current_llm_task = meta.get("active_cognition_task")
-                                        companion_state = meta.get("companion_state", "idle")
-                                        is_active = (current_llm_task and not current_llm_task.done()) or companion_state in ["speaking", "thinking"] or getattr(cognition, "is_generating", False)
-                                        if is_active:
-                                            cognition.abort_generation()
-                                        meta["companion_state"] = "sleep"
                                         if current_llm_task and not current_llm_task.done():
                                             current_llm_task.cancel()
                                         meta["active_cognition_task"] = None
-                                        
-                                        await manager.send_json(websocket, {
-                                            "type": "state_change",
-                                            "payload": {"state": "sleep"}
-                                        })
-                                        await manager.send_json(websocket, {
-                                            "type": "ai_state",
-                                            "payload": {"state": "sleep"}
-                                        })
+                                        meta["companion_state"] = "sleep"
+                                        await manager.send_json(websocket, {"type": "state_change", "payload": {"state": "sleep"}})
+                                        await manager.send_json(websocket, {"type": "ai_state", "payload": {"state": "sleep"}})
+                                        asyncio.create_task(speak_quick_phrase(websocket, "Entering standby mode, sir.", state="sleep"))
                                 else:
-                                    # Strict reset if gesture is not fist/stop
                                     meta["fist_start_time"] = None
 
-                                # 3. Thumbs Up -> Wake
-                                if gesture in ["thumbs_up", "like"]:
-                                    if time.time() - meta.get("last_thumbs_up_time", 0.0) >= 4.0:
-                                        meta["last_thumbs_up_time"] = time.time()
-                                        if current_status == "SLEEPING" or meta.get("companion_state") == "sleep":
-                                            logger.info("Companion Awakened to Idle (Thumbs Up)")
-                                            meta["system_status"] = "AWAKE"
-                                            meta["companion_state"] = "idle"
-                                            meta["fist_start_time"] = None
-                                            
-                                            await manager.send_json(websocket, {
-                                                "type": "state_change",
-                                                "payload": {"state": "idle"}
-                                            })
-                                            await manager.send_json(websocket, {
-                                                "type": "ai_state",
-                                                "payload": {"state": "idle"}
-                                            })
-                                        elif current_status == "AWAKE" and meta.get("companion_state") == "idle":
-                                            logger.info("Affirmation Received (Thumbs Up)")
-                                            await manager.send_json(websocket, {
-                                                "type": "state_change",
-                                                "payload": {"state": "affirmation"}
-                                            })
-                                            bg_tasks = meta["background_tasks"]
-                                            task = asyncio.create_task(background_llm_task(
-                                                websocket,
-                                                "The user gave an affirmative thumbs-up. Give a short, cheerful 1-sentence acknowledgment (e.g. 'Awesome, let's keep going!' or 'Understood!').",
-                                                "User gave a thumbs up.",
-                                                intent="greeting"
-                                            ))
-                                            meta["active_cognition_task"] = task
-                                            bg_tasks.add(task)
-                                            task.add_done_callback(bg_tasks.discard)
+                                # 3. Thumbs Up -> Wake if sleeping, or vocal confirmation if awake
+                                if gesture in ["thumbs_up", "like"] and streak >= 2:
+                                    if current_status == "SLEEPING" or meta.get("companion_state") == "sleep":
+                                        logger.info("Companion Awakened to Idle (Thumbs Up)")
+                                        meta["system_status"] = "AWAKE"
+                                        meta["companion_state"] = "idle"
+                                        meta["fist_start_time"] = None
+                                        await manager.send_json(websocket, {"type": "state_change", "payload": {"state": "idle"}})
+                                        await manager.send_json(websocket, {"type": "ai_state", "payload": {"state": "idle"}})
+                                        asyncio.create_task(speak_quick_phrase(websocket, "Jarvis online, ready sir.", state="speaking"))
+                                    elif current_status == "AWAKE" and not is_busy:
+                                        if time.time() - meta.get("last_thumbs_up_time", 0.0) >= 4.0:
+                                            meta["last_thumbs_up_time"] = time.time()
+                                            await manager.send_json(websocket, {"type": "state_change", "payload": {"state": "affirmation"}})
+                                            asyncio.create_task(speak_quick_phrase(websocket, "Affirmative, sir! Ready for your command.", state="affirmation"))
 
-                                # 4. Victory -> Proactive Greeting (Greeting)
-                                elif gesture in ["victory", "greeting"] and current_status == "AWAKE":
-                                    if time.time() - meta.get("last_victory_time", 0.0) >= 6.0:
-                                        logger.info("Proactive Greeting Triggered (Victory Sign)")
+                                # 4. Victory / Peace -> Spoken Greeting and Holographic Arc Cyan
+                                elif gesture in ["victory", "greeting"] and current_status == "AWAKE" and streak >= 2 and not is_busy:
+                                    if time.time() - meta.get("last_victory_time", 0.0) >= 5.0:
                                         meta["last_victory_time"] = time.time()
-                                        
-                                        bg_tasks = meta["background_tasks"]
-                                        task = asyncio.create_task(background_llm_task(
-                                            websocket,
-                                            "The user just flashed the victory/peace sign. Give a brief, warm 1-sentence greeting acknowledging their gesture.",
-                                            "User is throwing a peace sign.",
-                                            intent="greeting"
-                                        ))
-                                        meta["active_cognition_task"] = task
-                                        bg_tasks.add(task)
-                                        task.add_done_callback(bg_tasks.discard)
+                                        await manager.send_json(websocket, {"type": "state_change", "payload": {"state": "greeting"}})
+                                        asyncio.create_task(speak_quick_phrase(websocket, "Greetings, sir! Arc reactor and neural cores are nominal.", state="speaking"))
 
-                                # 5. Pointing Up -> Proactive Spatial Query (Scan)
-                                elif gesture in ["pointing_up", "pointing", "point"] and current_status == "AWAKE":
+                                # 5. Pointing Up -> Real-Time Camera Scan of Pointed Object
+                                elif gesture in ["pointing_up", "pointing", "point"] and current_status == "AWAKE" and streak >= 2:
                                     if time.time() - meta.get("last_point_time", 0.0) >= 6.0:
                                         latest_b64 = meta.get("latest_frame_b64")
                                         if latest_b64:
-                                            logger.info("Scene Analysis Triggered (Pointing Up)")
                                             meta["last_point_time"] = time.time()
-                                            
-                                            # Explicitly reset abort state for fresh requests
+                                            logger.info("Scene Analysis Triggered (Pointing Up Gesture)")
+                                            cognition.abort_generation()
+                                            prev_task = meta.get("active_cognition_task")
+                                            if prev_task and not prev_task.done():
+                                                prev_task.cancel()
                                             cognition.abort_requested = False
-                                            
-                                            # Extract directional finger context
-                                            spatial_hint = ""
-                                            if hands_data and "landmarks" in hands_data[0]:
-                                                lms = hands_data[0]["landmarks"]
-                                                if len(lms) >= 9:
-                                                    wrist = lms[0]
-                                                    tip = lms[8]
-                                                    spatial_hint = f"The hand has the WRIST at ({wrist[0]}, {wrist[1]}) and INDEX_FINGER_TIP at ({tip[0]}, {tip[1]}), pointing diagonally upward and to the left toward the upper-middle/center portion of the frame. "
 
-                                            rigorous_prompt = f"""You are a real-time, low-latency perceptual AI Companion.
-
-The user is performing an active pointing gesture (☝️) in their workspace. Look closely at the video frame:
-{spatial_hint}
-- Trace a straight diagonal line extending directly up and to the left from the tip of the pointed index finger (visible on the mid-right side).
-- Identify the target object exactly in this line of sight. (Note: There is a prominent collared/striped shirt hanging on a hanger or hook in the upper-middle background, just above the blacked-out area. It is NOT a lamp, ceiling fixture, or pendant light).
-- Acknowledge their gesture, recognize the targeted object (e.g., the hanging striped shirt/jacket), and in 1-2 concise, natural sentences, check in with what they are pointing at (e.g. "I see you're pointing at the striped shirt hanging behind you, what's up?")."""
+                                            real_vision_prompt = (
+                                                "You are an AI companion looking directly through the camera. "
+                                                "The user is actively pointing at an object or area in their environment. "
+                                                "Carefully inspect the image: identify what the user is pointing towards or displaying, "
+                                                "and state what you see in 1-2 concise, natural sentences."
+                                            )
 
                                             bg_tasks = meta["background_tasks"]
                                             task = asyncio.create_task(background_llm_task(
                                                 websocket,
-                                                rigorous_prompt,
-                                                "User is pointing up.",
+                                                real_vision_prompt,
+                                                "User is pointing at an object in the camera frame.",
                                                 intent="vision",
                                                 image_b64=latest_b64
                                             ))
                                             meta["active_cognition_task"] = task
                                             bg_tasks.add(task)
                                             task.add_done_callback(bg_tasks.discard)
-                                        else:
-                                            logger.warning("No camera frame available for Pointing Up gesture.")
 
                                 await manager.send_json(websocket, {
                                     "type": "perception_result",
@@ -452,8 +448,26 @@ The user is performing an active pointing gesture (☝️) in their workspace. L
                         else:
                             vc_str = "I don't see you in front of the camera."
                         
+                        # Cancel any previous still-running or hanging cognition task
+                        prev_task = meta.get("active_cognition_task")
+                        if prev_task and not prev_task.done():
+                            logger.info("Cancelling prior unfinished cognition task for incoming query.")
+                            cognition.abort_generation()
+                            prev_task.cancel()
+                        cognition.abort_requested = False
+
+                        # Route classification and dynamic visual attachment
+                        query_route = cognition.classify_query(user_text, vc_str)
+                        attached_frame = meta.get("latest_frame_b64") if query_route == "vision" else None
+
                         bg_tasks = meta["background_tasks"]
-                        task = asyncio.create_task(background_llm_task(websocket, user_text, vc_str))
+                        task = asyncio.create_task(background_llm_task(
+                            websocket,
+                            user_text,
+                            vc_str,
+                            intent=query_route,
+                            image_b64=attached_frame
+                        ))
                         meta["active_cognition_task"] = task
                         bg_tasks.add(task)
                         task.add_done_callback(bg_tasks.discard)

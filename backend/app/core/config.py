@@ -45,7 +45,8 @@ class Settings(BaseSettings):
 
     # Audio Recognition & Synthesis Settings (Phase 3 & Phase 4)
     WHISPER_MODEL_SIZE: str = "tiny.en"
-    EDGE_TTS_VOICE: str = "en-US-AriaNeural"
+    EDGE_TTS_VOICE: str = "en-IN-PrabhatNeural"
+    TTS_VOICE: str = "en-IN-PrabhatNeural"
 
     _backend_dir = Path(__file__).resolve().parent.parent.parent
     _project_root = _backend_dir.parent

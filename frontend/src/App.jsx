@@ -261,7 +261,7 @@ export default function App() {
     stream,
     isCameraActive,
     isConnected,
-    fps: 10,
+    fps: 6,
     onFrameReady: (frameBase64) => {
       sendMessage('video_frame', {
         data: frameBase64,
@@ -286,6 +286,21 @@ export default function App() {
           const now = Date.now();
           const last = lastGestureLogRef.current;
 
+          // Immediate priority interrupt: cut off audio if open palm is displayed while speaking
+          if (activeHand.gesture === 'open_palm') {
+            if (isAudioPlayingRef.current || audioQueueRef.current.length > 0) {
+              stopAudioPlayback();
+              setCompanionState('idle');
+              setSubtitle('✋ AI paused. I am waiting for you.');
+              setSentenceChunks([]);
+              sendMessage('interrupt_request', {});
+              if (now - last.timestamp > 1500) {
+                addLog('✋ Gesture Detected: Open Palm (Speech Interrupted)', 'error');
+                lastGestureLogRef.current = { gesture: activeHand.gesture, timestamp: now };
+              }
+            }
+          }
+
           if (last.gesture !== activeHand.gesture || now - last.timestamp > 3000) {
             lastGestureLogRef.current = { gesture: activeHand.gesture, timestamp: now };
 
@@ -295,12 +310,13 @@ export default function App() {
               setCompanionState('idle');
               setSubtitle('✋ AI paused. I am waiting for you.');
               setSentenceChunks([]);
+              sendMessage('interrupt_request', {});
             } else if (activeHand.gesture === 'victory') {
               addLog('✌️ Gesture Detected: Victory / Peace', 'success');
             } else if (activeHand.gesture === 'thumbs_up') {
               addLog('👍 Gesture Detected: Thumbs Up', 'success');
             } else if (activeHand.gesture === 'pointing_up') {
-              addLog('☝️ Gesture Detected: Pointing Up', 'system');
+              addLog('☝️ Gesture Detected: Pointing Up (Scanning...)', 'system');
             } else if (activeHand.gesture === 'fist') {
               addLog('✊ Gesture Detected: Fist (Standby)', 'system');
             }

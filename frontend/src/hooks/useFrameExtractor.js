@@ -10,10 +10,10 @@ export function useFrameExtractor({
   isConnected,
   onSendFrame,
   onFrameReady,
-  fps = 10,
-  width = 480,
-  height = 360,
-  quality = 0.65,
+  fps = 6,
+  width = 360,
+  height = 270,
+  quality = 0.50,
 }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);

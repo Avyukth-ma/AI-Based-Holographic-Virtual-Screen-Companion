@@ -85,9 +85,9 @@ class PerceptionEngine:
                     options = mp_vision.GestureRecognizerOptions(
                         base_options=base_options,
                         num_hands=2,
-                        min_hand_detection_confidence=0.3,
-                        min_hand_presence_confidence=0.3,
-                        min_tracking_confidence=0.3,
+                        min_hand_detection_confidence=0.55,
+                        min_hand_presence_confidence=0.55,
+                        min_tracking_confidence=0.55,
                     )
                     self.gesture_recognizer = mp_vision.GestureRecognizer.create_from_options(options)
                     logger.info("MediaPipe GestureRecognizer initialized successfully.")
@@ -213,12 +213,21 @@ class PerceptionEngine:
                         if recognition_result.handedness and idx < len(recognition_result.handedness):
                             handedness_label = recognition_result.handedness[idx][0].category_name
 
-                        # Determine recognized gesture
+                        # Determine recognized gesture and score
                         raw_gesture = "None"
+                        gesture_score = 0.0
                         if recognition_result.gestures and idx < len(recognition_result.gestures):
-                            raw_gesture = recognition_result.gestures[idx][0].category_name
+                            top_g = recognition_result.gestures[idx][0]
+                            raw_gesture = top_g.category_name
+                            gesture_score = float(top_g.score)
 
-                        gesture, event = self._normalize_gesture_name(raw_gesture)
+                        # Filter out low-confidence gesture classifications
+                        if gesture_score >= 0.48 and raw_gesture != "None":
+                            gesture, event = self._normalize_gesture_name(raw_gesture)
+                        else:
+                            gesture = "unknown"
+                            event = None
+
                         if event and not gesture_event:
                             gesture_event = event
 
@@ -242,6 +251,7 @@ class PerceptionEngine:
                             "handedness": handedness_label,
                             "gesture": gesture,
                             "raw_gesture": raw_gesture,
+                            "score": round(gesture_score, 2),
                             "event": event,
                             "bbox": hand_box,
                             "landmarks": landmarks_data,

@@ -42,21 +42,24 @@ export function useWebSocket(url = null) {
         reconnectAttemptsRef.current = 0;
         console.log('[WebSocket] Connected to', wsUrl);
 
-        // Start ping interval
+        // Start ping interval (every 3 seconds for responsive latency measurement)
         if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
         pingIntervalRef.current = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'ping', payload: { timestamp: Date.now() } }));
           }
-        }, 10000);
+        }, 3000);
       };
 
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
           if (data.type === 'pong' && data.payload?.client_timestamp) {
-            const rtt = Date.now() - data.payload.client_timestamp;
-            setLatency(rtt);
+            const rawRtt = Date.now() - data.payload.client_timestamp;
+            // Ignore stale pings from before a reconnect (>10s)
+            if (rawRtt >= 0 && rawRtt < 10000) {
+              setLatency(rawRtt);
+            }
           } else {
             setLastMessage(data);
             listenersRef.current.forEach((listener) => listener(data));
