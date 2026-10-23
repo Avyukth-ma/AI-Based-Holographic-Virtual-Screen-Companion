@@ -46,21 +46,26 @@ class PerceptionEngine:
     def _ensure_gesture_model(self) -> Optional[str]:
         """Ensure the MediaPipe gesture_recognizer.task model file is downloaded."""
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        model_path = os.path.join(base_dir, "gesture_recognizer.task")
+        backend_root = os.path.dirname(os.path.dirname(base_dir))
+        
+        # Candidate lookup locations in priority order
+        candidates = [
+            os.path.join(backend_root, "models", "gesture_recognizer.task"),
+            os.path.join(backend_root, "gesture_recognizer.task"),
+            os.path.join(base_dir, "gesture_recognizer.task"),
+        ]
+        for p in candidates:
+            if os.path.exists(p):
+                return p
 
-        # Also check backend root
-        backend_root_path = os.path.join(os.path.dirname(os.path.dirname(base_dir)), "gesture_recognizer.task")
-
-        if os.path.exists(model_path):
-            return model_path
-        if os.path.exists(backend_root_path):
-            return backend_root_path
-
+        # Default download target: backend/models/
+        target_path = os.path.join(backend_root, "models", "gesture_recognizer.task")
         try:
-            logger.info(f"Downloading MediaPipe gesture_recognizer.task to {model_path}...")
-            urllib.request.urlretrieve(GESTURE_TASK_URL, model_path)
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            logger.info(f"Downloading MediaPipe gesture_recognizer.task to {target_path}...")
+            urllib.request.urlretrieve(GESTURE_TASK_URL, target_path)
             logger.info("gesture_recognizer.task downloaded successfully.")
-            return model_path
+            return target_path
         except Exception as e:
             logger.error(f"Failed to download gesture_recognizer.task: {e}")
             return None
@@ -70,8 +75,19 @@ class PerceptionEngine:
         try:
             # 1. Initialize YOLOv8
             if _YOLO_AVAILABLE:
-                logger.info(f"Loading YOLOv8 model: {yolo_model_name}...")
-                self.yolo_model = YOLO(yolo_model_name)
+                backend_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                candidates = [
+                    os.path.join(backend_root, "models", yolo_model_name),
+                    os.path.join(backend_root, yolo_model_name),
+                    yolo_model_name,
+                ]
+                resolved_yolo = yolo_model_name
+                for c in candidates:
+                    if os.path.exists(c):
+                        resolved_yolo = c
+                        break
+                logger.info(f"Loading YOLOv8 model: {resolved_yolo}...")
+                self.yolo_model = YOLO(resolved_yolo)
                 logger.info("YOLOv8 initialized successfully.")
             else:
                 logger.warning("Ultralytics YOLO not installed. Person detection will be disabled.")

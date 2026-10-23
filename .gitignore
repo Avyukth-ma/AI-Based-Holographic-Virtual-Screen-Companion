@@ -51,3 +51,7 @@ Implementations-and-Walkthroughs/
 # --- Local Avatar Experiment Assets ---
 frontend/public/avatar*
 frontend/public/genie*
+backend/models/
+models/
+frontend/public/archive/
+docs/archive/
