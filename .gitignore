@@ -39,3 +39,15 @@ Thumbs.db
 scratch/
 */scratch/
 .system_generated/
+# --- Documentation & Planning Archives ---
+Implementations-and-Walkthroughs/
+*.docx
+
+# --- Audio & Temporary Media ---
+*.mp3
+
+# --- Build Timestamps ---
+*.timestamp*
+# --- Local Avatar Experiment Assets ---
+frontend/public/avatar*
+frontend/public/genie*
